@@ -91,15 +91,15 @@ class model_reporter():
     engine.run()
     '''
     def __init__(self,
-                 csvfile, 
+                 csvfile,
                  segs,
                  bmk_seg,
-                 dep, 
-                 model_path, 
+                 dep,
+                 model_path,
                  model_config,
-                 outputpath, 
-                 scring=False, 
-                 probs='probs', 
+                 outputpath,
+                 scring=False,
+                 probs='probs',
                  scr='scr',
                  scr_logbase = None) -> None:
         self.csvfile = csvfile
@@ -116,7 +116,6 @@ class model_reporter():
         self.model_config = model_config
         self.scring = scring
         self._load_model()
-        self._create_excel()
 
         self.seg_title_format = None
         self.title_format = None
@@ -124,6 +123,8 @@ class model_reporter():
         self.idx_format = None
         self.body_format = None
         self.ratio_format = None
+        self._create_excel()
+        os.makedirs('tmp', exist_ok=True)
 
     def _load_model(self):
         '''
@@ -147,10 +148,10 @@ class model_reporter():
         Initialization of creating excel
         '''
         self.workbook = xlsxwriter.Workbook(self.outputpath,options={'nan_inf_to_errors': True})
-        self.load_format()
+        self._load_format()
 
 
-    def load_format(self):
+    def _load_format(self):
         '''
         store all formats of the excel writter
         '''
@@ -424,15 +425,15 @@ class model_reporter():
                 df_tmp["grp"] = self.pct_rank_qcut(df_tmp[col], nbins=nbins, bins=bins[col])
     
             bivar = df_tmp.groupby(segs+["grp"]).agg({col:['count','mean'],self.dep:['mean']})
-
             bivar.columns = ['n', 'nmean', 'dep_rate']
             res[col] = bivar.unstack(level=0).reorder_levels([1,0],axis=1)
+
             if draw:
                 seglist = list(bivar.index.levels[0])
                 plt.figure(figsize=(8,4))
                 for s in seglist:
                     # plt.plot(bivar.loc[s]['nmean'],bivar.loc[s]['dep_rate'],label=s)
-                    plt.plot(list(range(len(res[col]))),bivar.loc[s]['dep_rate'],label=s)
+                    plt.plot(list(range(len(bivar.loc[s]['nmean']))),bivar.loc[s]['dep_rate'],label=s)
                 lgd = plt.legend(loc='center left', bbox_to_anchor=(1, 0.5), ncols = int(np.ceil(len(res)/15)))
                 plt.xlabel(col)
                 plt.ylabel("bad_rate")
