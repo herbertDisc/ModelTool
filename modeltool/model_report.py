@@ -369,6 +369,7 @@ class model_reporter():
         Min_Score = df.groupby(['score_rank'],sort=False,observed=False)[self.probs].min()
         Mean_Score = df.groupby(['score_rank'],sort=False,observed=False)[self.probs].mean()
         Max_Score = df.groupby(['score_rank'],sort=False,observed=False)[self.probs].max()
+        Min_Odds = df.groupby(['score_rank'],sort=False,observed=False)[self.scr].min()
 
         Total_Int = Total_Int.sort_index(ascending=sort_in)
         Responder = Responder.sort_index(ascending=sort_in)
@@ -377,6 +378,7 @@ class model_reporter():
         Min_Score = Min_Score.sort_index(ascending=sort_in)
         Mean_Score = Mean_Score.sort_index(ascending=sort_in)
         Max_Score = Max_Score.sort_index(ascending=sort_in)
+        Min_Odds = Min_Odds.sort_index(ascending=sort_in)
 
 
         PercResponder = (Responder/TotalResponder)
@@ -387,10 +389,10 @@ class model_reporter():
         KS = CumPercResponder-CumPercNonResponder
         lift = (ResponseRate)/(TotalResponder/Total)
         cum_lift = (np.cumsum(Responder)/np.cumsum(Total_Int))/(TotalResponder/Total) 
-        dev_name = [Total_Int,Min_Score,Mean_Score,Max_Score,Responder,PercResponder,CumPercResponder,CumPercNonResponder,ResponseRate,KS,lift,cum_lift]
-        columns = ["Total_Int","Min_Score","Mean_Score","Max_Score","Responder","PercResponder","CumPercResponder","CumPercNonResponder","ResponseRate","KS","lift","cum_lift"]
+        dev_name = [Total_Int,Min_Score,Mean_Score,Max_Score,Min_Odds,Responder,PercResponder,CumPercResponder,CumPercNonResponder,ResponseRate,KS,lift,cum_lift]
+        columns = ["Total_Int","Min_Score","Mean_Score","Max_Score","Min_Odds","Responder","PercResponder","CumPercResponder","CumPercNonResponder","ResponseRate","KS","lift","cum_lift"]
         KS_dev = pd.concat(dev_name, keys=columns, axis=1)
-        S=pd.Series([Total,df[self.probs].min(),df[self.probs].mean(),df[self.probs].max(),TotalResponder,1,"","",(TotalResponder/Total),abs(KS).max(),"",""]
+        S=pd.Series([Total,df[self.probs].min(),df[self.probs].mean(),df[self.probs].max(),df[self.scr].min(),TotalResponder,1,"","",(TotalResponder/Total),abs(KS).max(),"",""]
                     ,index=columns)
         KS_dev = KS_dev._append(S,ignore_index=True)
 
