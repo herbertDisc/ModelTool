@@ -18,7 +18,6 @@ def train_single_model(df_dev,
                        dep,
                        param,
                        varlist=None,
-                       oot_seg=None,
                        test_size= 0.33,
                        seed=123,
                        verbose=False,
@@ -49,6 +48,7 @@ def train_single_model(df_dev,
         param.setdefault(key, value)
 
     xgb_model = XGBClassifier(**param)
+    xgb_model.set_params(early_stopping_rounds=8)
     xgb_model = xgb_model.fit(X_train, y_train,
                                 eval_set=[(X_train[varlist], y_train),
                                           (X_test[varlist], y_test),
@@ -57,11 +57,10 @@ def train_single_model(df_dev,
 
     train_pred = xgb_model.predict_proba(X_train[varlist])[:,1]
     test_pred = xgb_model.predict_proba(X_test[varlist])[:,1]
-    df_oot.loc[:,'pred'] = xgb_model.predict_proba(df_oot[varlist])[:,1]
-    if oot_seg is not None:
-        perf = df_oot.groupby(oot_seg).apply(lambda x:auc_ks(x[dep],x['pred'])).to_dict()
-    else:
-        perf = {'oot':auc_ks(df_oot[dep],df_oot['pred'])}
+    perf = {}
+    for key,datain in df_oot.items():
+        datain.loc[:,'pred'] = xgb_model.predict_proba(datain[varlist])[:,1]
+        perf[key] = auc_ks(datain[dep],datain['pred'])
     perf['dev'] = auc_ks(y_train,train_pred)
     perf['test'] = auc_ks(y_test,test_pred)
     return xgb_model, perf
@@ -72,7 +71,6 @@ def hyperopt_search(df_dev,
                     param_space,
                     ntrials,
                     varlist=None,
-                    oot_seg=None,
                     test_size= 0.33,
                     seed=123):
 
@@ -96,7 +94,6 @@ def hyperopt_search(df_dev,
                                     dep=dep,
                                     param=model_param,
                                     varlist=varlist,
-                                    oot_seg=oot_seg,
                                     test_size= test_size,
                                     seed=seed)
 
@@ -118,7 +115,6 @@ def hyperopt_search(df_dev,
                                     dep=dep,
                                     param=best,
                                     varlist=varlist,
-                                    oot_seg=oot_seg,
                                     test_size= test_size,
                                     seed=seed)
     
@@ -132,7 +128,6 @@ def iter_random_search(df_dev,
                         varlist,
                         stop=30,
                         keep_importance = 1,
-                        oot_seg=None,
                         test_size= 0.33,
                         seed=123,
                         generate_report=False):
@@ -152,7 +147,6 @@ def iter_random_search(df_dev,
                                              param_space=param_space,
                                              ntrials=ntrials,
                                              varlist=varlist,
-                                             oot_seg=oot_seg,
                                              test_size= test_size,
                                              seed=seed)
 
@@ -172,7 +166,8 @@ def iter_random_search(df_dev,
             df_report = df_dev.copy()
             df_report.loc[X_train.index,'seg'] = 'dev'
             df_report.loc[X_test.index,'seg'] = 'val'
-            df_report = pd.concat([df_report.reset_index(drop=True), df_oot.reset_index(drop=True)],axis=0)
+            df_oot_all = pd.concat([df.assign(seg=key) for key, df in df_oot.items()], ignore_index=True)
+            df_report = pd.concat([df_report.reset_index(drop=True), df_oot_all.reset_index(drop=True)],axis=0)
             df_report['seg'] = df_report['seg'].fillna('oot')
             df_report[['seg','t0_cnt']+varlist].to_csv("./report/_tmp_output_variable.csv")
             mdlr =model_reporter("./report/_tmp_output_variable.csv",['seg'],['dev'],dep,f"model/model_{random_integer}_{len(imp_df)}.json",{},f'report/model_{random_integer}_{len(imp_df)}.xlsx', scring=True, scr_logbase=log_score)
@@ -180,57 +175,3 @@ def iter_random_search(df_dev,
 
         varlist = var_next
     return
-
-# def objective(trial, df_dev, df_oot, dep, varlist,oot_seg,test_size,seed):
-#     """
-#     Objective function that Optuna will optimize.
-#     This function defines the hyperparameter search space and trains/evaluates the XGBoost model.
-#     """
-    
-#     # Suggest hyperparameters for XGBoost
-#     param = {
-#         'max_depth': trial.suggest_int('max_depth', 3, 5),
-#         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log= True),
-#         'n_estimators': trial.suggest_int('n_estimators', 50, 80),
-#         'gamma': trial.suggest_float('gamma', 0, 5),
-#         'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-#         'subsample': trial.suggest_float('subsample', 0.5, 0.8),
-#         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-#         'reg_alpha': trial.suggest_float('reg_alpha', 10, 100),
-#         'reg_lambda': trial.suggest_float('reg_lambda', 10, 100),
-#         'eval_metric': 'auc',
-#         'scale_pos_weight': 0.2,
-#     }
-
-#     # Train the XGBoost model
-#     _,perf = train_single_model(df_dev=df_dev,
-#                                 df_oot=df_oot,
-#                                 dep=dep,
-#                                 param=param,
-#                                 varlist=varlist,
-#                                 oot_seg=oot_seg,
-#                                 test_size= test_size,
-#                                 seed=seed)
-    
-#     # Evaluate accuracy
-#     accuracy = 1 - perf['test'][0]
-    
-#     # Return the accuracy as the objective to maximize
-#     return accuracy
-
-# def optimize_hyperparameters(df_dev, df_oot, dep, varlist=None,oot_seg=None,test_size=0.33,seed=123,ntrials=60):
-#     """Use Optuna to optimize hyperparameters for XGBoost."""
-#     # Load the data
-
-#     # Define the Optuna study (for maximization of accuracy)
-#     study = optuna.create_study(direction='maximize')
-    
-#     # Optimize using the objective function
-#     study.optimize(lambda trial: objective(trial, df_dev, df_oot, dep, varlist,oot_seg,test_size, seed), n_trials=ntrials)
-    
-#     # Print the best trial and hyperparameters
-#     print(f'Best trial: {study.best_trial.number}')
-#     print(f'Best accuracy: {study.best_trial.value}')
-#     print(f'Best hyperparameters: {study.best_trial.params}')
-    
-#     return study.best_trial
