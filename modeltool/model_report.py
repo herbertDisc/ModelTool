@@ -426,7 +426,7 @@ class model_reporter():
             else:
                 df_tmp["grp"] = self.pct_rank_qcut(df_tmp[col], nbins=nbins, bins=bins[col])
     
-            bivar = df_tmp.groupby(segs+["grp"]).agg({col:['count','mean'],self.dep:['mean']})
+            bivar = df_tmp.groupby(segs+["grp"]).agg({col:['size','mean'],self.dep:['mean']})
             bivar.columns = ['n', 'nmean', 'dep_rate']
             res[col] = bivar.unstack(level=0).reorder_levels([1,0],axis=1)
 
