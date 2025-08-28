@@ -59,6 +59,7 @@ def train_single_model(df_dev,
     test_pred = xgb_model.predict_proba(X_test[varlist])[:,1]
     perf = {}
     for key,datain in df_oot.items():
+        datain = datain.copy()
         datain.loc[:,'pred'] = xgb_model.predict_proba(datain[varlist])[:,1]
         perf[key] = auc_ks(datain[dep],datain['pred'])
     perf['dev'] = auc_ks(y_train,train_pred)
@@ -169,9 +170,73 @@ def iter_random_search(df_dev,
             df_oot_all = pd.concat([df.assign(seg=key) for key, df in df_oot.items()], ignore_index=True)
             df_report = pd.concat([df_report.reset_index(drop=True), df_oot_all.reset_index(drop=True)],axis=0)
             df_report['seg'] = df_report['seg'].fillna('oot')
-            df_report[['seg','t0_cnt']+varlist].to_csv("./report/_tmp_output_variable.csv")
+            df_report[['seg', 't0_cnt', 't3_cnt', 't7_cnt']+varlist].to_csv("./report/_tmp_output_variable.csv")
             mdlr =model_reporter("./report/_tmp_output_variable.csv",['seg'],['dev'],dep,f"model/model_{random_integer}_{len(imp_df)}.json",{},f'report/model_{random_integer}_{len(imp_df)}.xlsx', scring=True, scr_logbase=log_score)
             mdlr.run()
 
         varlist = var_next
     return
+
+def single_random_search(df_dev,
+                        df_oot,
+                        dep,
+                        param_space,
+                        rounds,
+                        ntrials,
+                        varlist,
+                        test_size= 0.33,
+                        seed=None,
+                        generate_report=False,
+                        unique_id=['loan_id']):
+
+    os.makedirs('single_rd_search', exist_ok=True)
+    os.makedirs('single_rd_search/model', exist_ok=True)
+    os.makedirs('single_rd_search/report', exist_ok=True)
+    log_score = 1/(df_dev[dep].sum()/len(df_dev)) -1
+
+    res = []
+    for i in range(rounds):
+        all_params = {'round':i}
+        random_integer = random.randint(10000, 20000)
+        if not seed:
+            all_params['seed'] = random_integer
+        model, param, perf = hyperopt_search(df_dev=df_dev,
+                                             df_oot=df_oot,
+                                             dep=dep,
+                                             param_space=param_space,
+                                             ntrials=ntrials,
+                                             varlist=varlist,
+                                             test_size= test_size,
+                                             seed=all_params['seed'])
+
+        perf_flat = {f"{k}_auc": v[0] for k, v in perf.items()}
+        perf_flat.update({f"{k}_ks": v[1] for k, v in perf.items()})
+
+        imp_df = pd.DataFrame({'col':df_dev[varlist].columns,
+                  'imp':model.feature_importances_})
+        imp_df_sort = imp_df.sort_values('imp',ascending=False)
+        all_params.update(perf_flat)
+        all_params.update(param)
+        all_params['param_conc'] = param
+        all_params['var_sort'] = imp_df_sort['col'].to_list()
+        print(f'round_{i}:', perf)
+        print(f'round_{i}:', param)
+
+        model.save_model(f"single_rd_search/model/model_{i}.json")
+        gc.collect()
+        if generate_report:
+            X_train, X_test, _, _ = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=all_params['seed'])
+            df_report = df_dev.copy()
+            df_report.loc[X_train.index,'seg'] = 'dev'
+            df_report.loc[X_test.index,'seg'] = 'val'
+            df_oot_all = pd.concat([df.assign(seg=key) for key, df in df_oot.items()], ignore_index=True)
+            df_report = pd.concat([df_report.reset_index(drop=True), df_oot_all.reset_index(drop=True)],axis=0)
+            df_report['seg'] = df_report['seg'].fillna('oot')
+            df_report[unique_id+['seg', 't0_cnt', 't3_cnt', 't7_cnt']+varlist].to_csv("./single_rd_search/report/_tmp_output_variable.csv",index=False)
+            mdlr =model_reporter("./single_rd_search/report/_tmp_output_variable.csv",['seg'],['dev'],dep,f"single_rd_search/model/model_{i}.json",{},f'single_rd_search/report/model_{i}.xlsx', scring=True, scr_logbase=log_score)
+            mdlr.run()
+        res.append(all_params)
+
+    out = pd.DataFrame(res)
+    out.to_csv('./single_rd_search/rd_search_report.csv',index=False)
+    return out
