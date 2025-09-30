@@ -140,7 +140,7 @@ class model_reporter():
             self.model.load_model(self.model_path)
             self.varlist = list(self.model.feature_names_in_)
         self.cat_varlist = [self.model.feature_names_in_[i] for i in range(len(self.varlist)) if self.model.feature_types[i]=='category']
-        self.num_varlist = [x for x in self.varlist if x not in self.cat_varlist]
+        self.num_varlist = [f for _, f in sorted(zip(self.model.feature_importances_, self.model.feature_names_in_),reverse=True) if f not in self.cat_varlist]
 
 
     def _create_excel(self):

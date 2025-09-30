@@ -7,6 +7,8 @@ import pandas as pd
 import os, random
 import gc
 from .model_report import model_reporter
+from datetime import datetime
+
 def auc_ks(y_true, y_pred):
     fpr, tpr, _ = roc_curve(y_true, y_pred)
     mdl_auc = auc(fpr, tpr)
@@ -18,10 +20,12 @@ def train_single_model(df_dev,
                        dep,
                        param,
                        varlist=None,
+                       weight_col = None,
                        test_size= 0.33,
                        seed=123,
                        verbose=False,
-                       generate_report=False):
+                       generate_report=False,
+                       additional_target=[]):
     '''
     Sample param:
     {'colsample_bytree': 0.9214981176986129,
@@ -37,9 +41,15 @@ def train_single_model(df_dev,
      'early_stopping_rounds': 15,
     }
     '''
+    df_dev = df_dev.copy()
     if varlist is None:
         varlist = [x for x in df_dev.columns if x != dep]
-    X_train, X_test, y_train, y_test = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=seed)
+
+    if weight_col is None:
+        df_dev['_tmp_weight'] = 1
+        weight_col = '_tmp_weight'
+
+    X_train, X_test, y_train, y_test, w_train, _ = train_test_split(df_dev[varlist], df_dev[dep],df_dev[weight_col], test_size=test_size, random_state=seed)
 
     # For some defualt value if not set in param
     default_param = {'importance_type': "total_gain",
@@ -49,7 +59,7 @@ def train_single_model(df_dev,
 
     xgb_model = XGBClassifier(**param)
     xgb_model.set_params(early_stopping_rounds=8)
-    xgb_model = xgb_model.fit(X_train, y_train,
+    xgb_model = xgb_model.fit(X_train, y_train,sample_weight=w_train,
                                 eval_set=[(X_train[varlist], y_train),
                                           (X_test[varlist], y_test),
                                             ],
@@ -64,6 +74,22 @@ def train_single_model(df_dev,
         perf[key] = auc_ks(datain[dep],datain['pred'])
     perf['dev'] = auc_ks(y_train,train_pred)
     perf['test'] = auc_ks(y_test,test_pred)
+
+    if generate_report:
+        os.makedirs('tmp_single_model', exist_ok=True)
+        nowtime = datetime.now().strftime("%y%m%d%H%M%S")
+        X_train, X_test, y_train, y_test = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=seed)
+        df_report = df_dev.copy()
+        df_report.loc[X_train.index,'seg'] = 'dev'
+        df_report.loc[X_test.index,'seg'] = 'val'
+        df_oot_all = pd.concat([df.assign(seg=key) for key, df in df_oot.items()], ignore_index=True)
+        df_report = pd.concat([df_report.reset_index(drop=True), df_oot_all.reset_index(drop=True)],axis=0)
+        df_report['seg'] = df_report['seg'].fillna('oot')
+        df_report[['seg', dep]+additional_target+varlist].to_csv("./tmp_single_model/_tmp_output_variable.csv")
+        xgb_model.save_model(f"./tmp_single_model/_tmp_model_{nowtime}.json")
+        log_score = 1/(df_dev[dep].sum()/len(df_dev)) -1
+        mdlr =model_reporter("./tmp_single_model/_tmp_output_variable.csv",['seg'],['dev'],dep,f"./tmp_single_model/_tmp_model_{nowtime}.json",{},f'./tmp_single_model/model_{nowtime}.xlsx', scring=True, scr_logbase=log_score)
+        mdlr.run()
     return xgb_model, perf
 
 def hyperopt_search(df_dev,
@@ -71,6 +97,7 @@ def hyperopt_search(df_dev,
                     dep,
                     param_space,
                     ntrials,
+                    weight_col=None,
                     varlist=None,
                     test_size= 0.33,
                     seed=123):
@@ -93,6 +120,7 @@ def hyperopt_search(df_dev,
         _,perf = train_single_model(df_dev=df_dev,
                                     df_oot=df_oot,
                                     dep=dep,
+                                    weight_col=weight_col,
                                     param=model_param,
                                     varlist=varlist,
                                     test_size= test_size,
@@ -115,6 +143,7 @@ def hyperopt_search(df_dev,
                                     df_oot=df_oot,
                                     dep=dep,
                                     param=best,
+                                    weight_col=weight_col,
                                     varlist=varlist,
                                     test_size= test_size,
                                     seed=seed)
@@ -127,6 +156,7 @@ def iter_random_search(df_dev,
                         param_space,
                         ntrials,
                         varlist,
+                        weight_col=None,
                         stop=30,
                         keep_importance = 1,
                         test_size= 0.33,
@@ -134,9 +164,9 @@ def iter_random_search(df_dev,
                         generate_report=False):
 
     random_integer = random.randint(10000, 20000)
-    os.makedirs('var', exist_ok=True)
-    os.makedirs('model', exist_ok=True)
-    os.makedirs('report', exist_ok=True)
+    os.makedirs('iter_randsearch/var', exist_ok=True)
+    os.makedirs('iter_randsearch/model', exist_ok=True)
+    os.makedirs('iter_randsearch/report', exist_ok=True)
     log_score = 1/(df_dev[dep].sum()/len(df_dev)) -1
     var_round_len = len(varlist) - 1
     while len(varlist) > stop and var_round_len != len(varlist):
@@ -148,6 +178,7 @@ def iter_random_search(df_dev,
                                              param_space=param_space,
                                              ntrials=ntrials,
                                              varlist=varlist,
+                                             weight_col=weight_col,
                                              test_size= test_size,
                                              seed=seed)
 
@@ -155,12 +186,12 @@ def iter_random_search(df_dev,
                   'imp':model.feature_importances_})
         imp_df_sort = imp_df.sort_values('imp',ascending=False)
         imp_df_sort['cum_imp'] = imp_df_sort['imp'].cumsum()
-        imp_df.to_csv(f"var/round_{random_integer}_{len(imp_df)}.csv", index=False)
+        imp_df.to_csv(f"iter_randsearch/var/round_{random_integer}_{len(imp_df)}.csv", index=False)
         print(f'round_{len(imp_df)}:', perf)
         print(f'round_{len(imp_df)}:', param)
         var_next = imp_df_sort[(imp_df_sort['cum_imp']<=keep_importance)&(imp_df_sort['imp']>0)]['col'].to_list()
 
-        model.save_model(f"model/model_{random_integer}_{len(imp_df)}.json")
+        model.save_model(f"iter_randsearch/model/model_{random_integer}_{len(imp_df)}.json")
         gc.collect()
         if generate_report:
             X_train, X_test, y_train, y_test = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=seed)
@@ -170,8 +201,8 @@ def iter_random_search(df_dev,
             df_oot_all = pd.concat([df.assign(seg=key) for key, df in df_oot.items()], ignore_index=True)
             df_report = pd.concat([df_report.reset_index(drop=True), df_oot_all.reset_index(drop=True)],axis=0)
             df_report['seg'] = df_report['seg'].fillna('oot')
-            df_report[['seg', 't0_cnt', 't3_cnt', 't7_cnt']+varlist].to_csv("./report/_tmp_output_variable.csv")
-            mdlr =model_reporter("./report/_tmp_output_variable.csv",['seg'],['dev'],dep,f"model/model_{random_integer}_{len(imp_df)}.json",{},f'report/model_{random_integer}_{len(imp_df)}.xlsx', scring=True, scr_logbase=log_score)
+            df_report[['seg', 't0_cnt', 't3_cnt', 't7_cnt']+varlist].to_csv("./iter_randsearch/_tmp_output_variable.csv")
+            mdlr =model_reporter("./iter_randsearch/_tmp_output_variable.csv",['seg'],['dev'],dep,f"iter_randsearch/model/model_{random_integer}_{len(imp_df)}.json",{},f'iter_randsearch/report/model_{random_integer}_{len(imp_df)}.xlsx', scring=True, scr_logbase=log_score)
             mdlr.run()
 
         varlist = var_next
@@ -184,6 +215,7 @@ def single_random_search(df_dev,
                         rounds,
                         ntrials,
                         varlist,
+                        weight_col=None,
                         test_size= 0.33,
                         seed=None,
                         generate_report=False,
@@ -200,10 +232,13 @@ def single_random_search(df_dev,
         random_integer = random.randint(10000, 20000)
         if not seed:
             all_params['seed'] = random_integer
+        else:
+            all_params['seed'] = seed
         model, param, perf = hyperopt_search(df_dev=df_dev,
                                              df_oot=df_oot,
                                              dep=dep,
                                              param_space=param_space,
+                                             weight_col=weight_col,
                                              ntrials=ntrials,
                                              varlist=varlist,
                                              test_size= test_size,
