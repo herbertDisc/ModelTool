@@ -20,6 +20,8 @@ Update Log:
 
 import pandas as pd
 from xgboost import XGBClassifier
+import xgboost as xgb
+import lightgbm as lgb
 import xlsxwriter
 from sklearn import metrics
 from sklearn.metrics import roc_curve, auc
@@ -27,6 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 import os
+import joblib
 
 class model_reporter():
     '''
@@ -46,6 +49,8 @@ class model_reporter():
             modeling training hyperparameters
         outputpath: string
             file path for saving the final output
+        model_type: string xgb or lgb
+            model type
         scring: boolean
             if scoring process is needed
         probs: string default probs
@@ -98,6 +103,7 @@ class model_reporter():
                  model_path,
                  model_config,
                  outputpath,
+                 model_type='xgb',
                  scring=False,
                  probs='probs',
                  scr='scr',
@@ -112,6 +118,7 @@ class model_reporter():
         self.scr_logbase = scr_logbase
 
         self.model_path = model_path
+        self.model_type = model_type
         self.model = None
         self.model_config = model_config
         self.scring = scring
@@ -130,17 +137,20 @@ class model_reporter():
         '''
         Function to load model.
         '''
-        _, file_extension = os.path.splitext(self.model_path)
-        if file_extension == '.pkl':
-            with open(self.model_path, 'rb') as file:
-                self.model = pickle.load(file)
-                self.varlist = list(self.model.feature_names)
+        if self.model_type == 'xgb':
+            self.model = xgb.Booster(model_file=self.model_path)
+            self.varlist = self.model.feature_names
+            imp =self.model.get_score(importance_type="gain")
+            self.varlist_sort = sorted(imp, key=imp.get, reverse=True)
+            self.cat_varlist = [self.varlist_sort[i] for i in range(len(self.varlist_sort)) if self.model.feature_types[i]=='category']
         else:
-            self.model = XGBClassifier(**self.model_config)
-            self.model.load_model(self.model_path)
-            self.varlist = list(self.model.feature_names_in_)
-        self.cat_varlist = [self.model.feature_names_in_[i] for i in range(len(self.varlist)) if self.model.feature_types[i]=='category']
-        self.num_varlist = [f for _, f in sorted(zip(self.model.feature_importances_, self.model.feature_names_in_),reverse=True) if f not in self.cat_varlist]
+            self.model = lgb.Booster(model_file=self.model_path)
+            self.varlist = self.model.feature_name()
+            self.varlist_sort = [f for f, _ in sorted(zip(self.model.feature_name(),
+                                                    self.model.feature_importance(importance_type='gain')),
+                                                key=lambda x: x[1], reverse=True)]
+            self.cat_varlist = []
+        self.num_varlist = [f for f in self.varlist_sort if f not in self.cat_varlist]
 
 
     def _create_excel(self):
@@ -492,9 +502,20 @@ class model_reporter():
         ############# model attributes with importance
         row += self.write_seg_line(worksheet, row, col,
                                     "Model attributes with the attribute importance")
-        imp_df = pd.DataFrame({'Attr':list(self.model.feature_names_in_),
-                  'Imp':self.model.feature_importances_}).sort_values('Imp',ascending=False)
-        max_len = imp_df['Attr'].apply(lambda x: len(x)).max()
+
+        if self.model_type == 'xgb':
+            imp = self.model.get_score(importance_type="gain")
+            imp_df = (
+                pd.DataFrame(list(imp.items()), columns=["Attr", "Imp"])
+                .sort_values("Imp", ascending=False)
+                .reset_index(drop=True)
+            )
+        else:
+            imp_df = pd.DataFrame({"Attr": self.model.feature_name(),
+                                   "Imp": self.model.feature_importance(importance_type='gain')
+                                }).sort_values("Imp", ascending=False)
+        imp_df["Imp"] = imp_df["Imp"] / imp_df["Imp"].sum()
+        max_len = imp_df['Attr'].str.len().max()
         imp_df = imp_df.set_index('Attr')
         self.writedf(imp_df, worksheet, row, col, indexing=True, ratio_col=['Imp']
                      ,title="1.Model attributes and importance")
@@ -557,7 +578,7 @@ class model_reporter():
         # dup seg columns in order to get the group name within the group by function
         bivar_l= self.bivar(df, segs=segs, bins=bin_dict)[0]
 
-        for var in self.varlist:
+        for var in self.varlist_sort:
             row += self.write_seg_line(worksheet, row, col, var)
             worksheet.insert_image(row, col+len(bivar_l[var].columns)+5, f"tmp/{var}.png" ,{'x_scale': 0.8, 'y_scale': 0.8})
             row += max(self.writedf(bivar_l[var].fillna('Null'), worksheet, row, col, indexing=True, ratio_col=['Dep_rate'], cdt_fmt=['Dep_rate'])[0],12) + 3
@@ -578,7 +599,7 @@ class model_reporter():
         col = 1
         worksheet = self.workbook.add_worksheet(sheetname)
 
-        res = df.groupby(seg).apply(means_report,varlist = self.varlist, include_groups=False).reset_index()
+        res = df.groupby(seg).apply(means_report,varlist = self.varlist_sort, include_groups=False).reset_index()
 
         max_row,max_col = self.writedf(res, worksheet, row, col,ratio_col = ['%nmiss'], indexing=False)
         worksheet.autofilter(1, 1, max_row, max_col)
@@ -593,7 +614,11 @@ class model_reporter():
             df[seg] = df[seg].astype(str)
 
         if self.scring:
-            df['probs'] = self.model.predict_proba(df[self.varlist])[:,1]
+            if self.model_type == 'xgb':
+                data_m = xgb.DMatrix(df[self.varlist])
+            else:
+                data_m = df[self.varlist]
+            df['probs'] = self.model.predict(data_m)
             df['scr'] = 650 + round(30*(np.log((1-df['probs'])/df['probs'])-np.log(self.scr_logbase))/np.log(2))
 
         self.write_summary(df,self.segs,self.dep)
