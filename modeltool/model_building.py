@@ -1,6 +1,5 @@
 from sklearn.metrics import roc_curve, auc
 from sklearn.model_selection import train_test_split
-from xgboost import XGBClassifier
 import xgboost as xgb
 import lightgbm as lgb
 import hyperopt
@@ -44,11 +43,12 @@ def train_single_model(df_dev,
      'early_stopping_rounds': 15,
     }
     '''
+    df_dev = df_dev.copy()
     if varlist is None:
         varlist = [x for x in df_dev.columns if x != dep]
 
     if weight_col is None:
-        df_dev['_tmp_weight'] = 1
+        df_dev.loc[:, '_tmp_weight'] = 1
         weight_col = '_tmp_weight'
 
     X_train, X_valid, y_train, y_valid, w_train, _ = train_test_split(
@@ -392,7 +392,11 @@ def single_random_search(df_dev,
         print(f'round_{i}:', perf)
         print(f'round_{i}:', param)
 
-        model.save_model(f"single_rd_search/model/model_{i}.json")
+        if model_type == 'xgb':
+            model_path = os.path.join(base_dir, 'model', f"model_{i}.json")
+        else:
+            model_path = os.path.join(base_dir, 'model', f"model_{i}.txt")
+        model.save_model(model_path)
         gc.collect()
         if generate_report and len(varlist)< 200:
             X_train, X_test, _, _ = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=all_params['seed'])
@@ -410,7 +414,7 @@ def single_random_search(df_dev,
                                  bmk_seg=['dev'],
                                  dep=dep,
                                  model_type=model_type,
-                                 model_path=f"single_rd_search/model/model_{i}.json",
+                                 model_path=model_path,
                                  model_config={},
                                  outputpath=report_path,
                                  scring=True,
