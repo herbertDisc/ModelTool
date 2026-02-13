@@ -3,19 +3,19 @@ from sklearn.model_selection import train_test_split
 import xgboost as xgb
 import lightgbm as lgb
 import hyperopt
-import optuna
 import pandas as pd
 import os, random
 import gc
 from .model_report import model_reporter
 from datetime import datetime
-import pickle
+import numpy as np
 
 def auc_ks(y_true, y_pred):
     fpr, tpr, _ = roc_curve(y_true, y_pred)
     mdl_auc = auc(fpr, tpr)
     mdl_ks = max(tpr - fpr)
-    return [round(mdl_auc,3), round(mdl_ks,3)]
+
+    return {'auc': round(mdl_auc,3), 'ks': round(mdl_ks,3)}
 
 def train_single_model(df_dev,
                        df_oot,
@@ -27,7 +27,8 @@ def train_single_model(df_dev,
                        seed=123,
                        generate_report=False,
                        model_type = 'xgb',
-                       additional_target=['loan_id']):
+                       additional_target=['loan_id'],
+                       eval_func=None):
     '''
     Sample param:
     {'colsample_bytree': 0.9214981176986129,
@@ -111,6 +112,7 @@ def train_single_model(df_dev,
 
 
     perf = {}
+    eval_func = auc_ks if eval_func is None else eval_func
     for key,datain in df_oot.items():
         datain = datain.copy()
         if model_type == 'xgb':
@@ -119,9 +121,9 @@ def train_single_model(df_dev,
             D_oot = datain[varlist]
         datain['pred'] = model.predict(D_oot)
 
-        perf[key] = auc_ks(datain[dep], datain['pred'])
-    perf['dev'] = auc_ks(y_train, train_pred)
-    perf['test'] = auc_ks(y_valid, test_pred)
+        perf[key] = eval_func(datain[dep].to_numpy(), datain['pred'].to_numpy())
+    perf['dev'] = eval_func(y_train.to_numpy(), train_pred)
+    perf['test'] = eval_func(y_valid.to_numpy(), test_pred)
 
     if generate_report and len(varlist)< 200:
         os.makedirs('tmp_single_model', exist_ok=True)
@@ -156,7 +158,8 @@ def hyperopt_search(df_dev,
                     weight_col=None,
                     varlist=None,
                     test_size= 0.33,
-                    seed=123):
+                    seed=123,
+                    eval_func=None):
 
     def hyperopt_objective(params):
 
@@ -199,10 +202,11 @@ def hyperopt_search(df_dev,
                                     param=model_param,
                                     varlist=varlist,
                                     test_size= test_size,
-                                    seed=seed)
+                                    seed=seed,
+                                    eval_func=eval_func)
 
         return {
-            'loss': 1 - perf['test'][0],
+            'loss': 1 - perf['test'].get('auc', list(perf['test'].values())[0]),
             'status': hyperopt.STATUS_OK,
             'model': model,
             'perf': perf,
@@ -245,7 +249,8 @@ def iter_random_search(df_dev,
                        seed=123,
                        generate_report=False,
                        suffix='',
-                       additional_target=['loan_id']):
+                       additional_target=['loan_id'],
+                       eval_func=None):
     """
     run a iterative random search for variable reduction
     
@@ -269,7 +274,8 @@ def iter_random_search(df_dev,
                                              varlist=varlist,
                                              weight_col=weight_col,
                                              test_size= test_size,
-                                             seed=seed)
+                                             seed=seed,
+                                             eval_func=eval_func)
 
         if model_type == 'xgb':
             imp = model.get_score(importance_type="gain")
@@ -336,7 +342,8 @@ def single_random_search(df_dev,
                          seed=None,
                          generate_report=False,
                          suffix='',
-                         additional_target=['loan_id']):
+                         additional_target=['loan_id'],
+                         eval_func=None):
     """
     run a random search on the hyperparameter space
 
@@ -364,10 +371,14 @@ def single_random_search(df_dev,
                                              ntrials=ntrials,
                                              varlist=varlist,
                                              test_size= test_size,
-                                             seed=all_params['seed'])
+                                             seed=all_params['seed'],
+                                             eval_func=eval_func)
 
-        perf_flat = {f"{k}_auc": v[0] for k, v in perf.items()}
-        perf_flat.update({f"{k}_ks": v[1] for k, v in perf.items()})
+        perf_flat = {}
+        for k, v in perf.items():
+            if isinstance(v, dict):
+                for metric, val in v.items():
+                    perf_flat[f"{k}_{metric}"] = val
 
         # imp_df = pd.DataFrame({'col':df_dev[varlist].columns,
         #           'imp':model.get_score(importance_type="total_gain")})

@@ -19,7 +19,6 @@ Update Log:
 
 
 import pandas as pd
-from xgboost import XGBClassifier
 import xgboost as xgb
 import lightgbm as lgb
 import xlsxwriter
@@ -27,9 +26,8 @@ from sklearn import metrics
 from sklearn.metrics import roc_curve, auc
 import matplotlib.pyplot as plt
 import numpy as np
-import pickle
 import os
-import joblib
+import json
 
 class model_reporter():
     '''
@@ -226,11 +224,14 @@ class model_reporter():
         worksheet.set_row(row, 15, self.seg_title_format)
         return 2
 
-    def writedf(self, df, worksheet, row, col, indexing=False, ratio_col=[], cdt_fmt=[], title=None):
+    def writedf(self, df, worksheet, row, col, indexing=False, ratio_col=None, cdt_fmt=None, title=None):
         '''
         write a whole dataframe into wroksheet
         '''
-        # df.to_excel(writer, sheet_name=sheet_name,startcol=startcol, startrow=start_row+1, header=False)
+        if ratio_col is None:
+            ratio_col = []
+        if cdt_fmt is None:
+            cdt_fmt = []
         def writerow(ws,row,col,arr,fmt):
             for idx,val in enumerate(arr):
                 ws.write(row,col+idx,val,fmt)
@@ -277,7 +278,7 @@ class model_reporter():
         df_shape[1] += idx_len
         return df_shape
 
-    def writedf_para(self, df_list, worksheet, row, col, indexing=False, ratio_col=[], cdt_fmt=[], title=None):
+    def writedf_para(self, df_list, worksheet, row, col, indexing=False, ratio_col=None, cdt_fmt=None, title=None):
         '''
         write a list of dataframe in parallel
         Input:
@@ -303,6 +304,10 @@ class model_reporter():
             cur_col:
                 the current column
         '''
+        if ratio_col is None:
+            ratio_col = []
+        if cdt_fmt is None:
+            cdt_fmt = []
         cur_col = col
         max_row = 0
         for idx, df in enumerate(df_list):
@@ -335,7 +340,7 @@ class model_reporter():
         plt.close()
         return pd.DataFrame(res.values,index=res.index,columns=['AUC','KS'])
 
-    def pct_rank_qcut(self, series, nbins, bins = None):
+    def pct_rank_qcut(self, series, nbins=None, bins = None):
         '''
         Function for binning the data
         '''
@@ -353,7 +358,7 @@ class model_reporter():
             grp = pd.cut(series, bins=bins, labels = False)
             grp = grp.fillna(-1)
 
-            return grp
+            return grp, list(bins)
 
     def KS(self, df, bins=10, custom_bins = None, sort_in=False):
         """
@@ -414,6 +419,77 @@ class model_reporter():
 
         return KS_dev,roc_auc_dev, custom_bins
 
+    def _psi(self, df, col, bmk_pct, bmk_bins, grp=None, numerical=True):
+        '''
+        function to calculate single column psi
+        '''
+        # in case new data is missing any bins
+        res = []
+        for i in df[grp].unique():
+            df_tmp = bmk_pct.copy()
+            df_tmp[grp] = i
+            res.append(df_tmp)
+        df_bmk = pd.concat(res)
+        # get bins
+        if numerical:
+            df['bins'],_ = self.pct_rank_qcut(df[col], bins=bmk_bins)
+            df_pct = (df.groupby([grp, 'bins'])[col].size()/df.groupby(grp)[col].size()).to_frame().reset_index()
+            df_pct = df_pct.merge(df_bmk, on=[grp, 'bins'],how='right').fillna(0.000001)
+        else:
+            df_pct = (df.groupby([grp,col]).size()/df.groupby(grp)[col].size()).to_frame().reset_index()
+            df_pct = df_pct.merge(df_bmk, on=[col],how='right').fillna(0.000001)
+        df_pct['woe'] = (df_pct[col] - df_pct['bmk']) * np.log(df_pct[col]/df_pct['bmk'])
+        df_pct = df_pct.set_index([grp,'bins'])
+        dfout_pct = df_pct[col].unstack().round(4)
+        dfout_pct.columns = [str(x)+'_pct' for x in dfout_pct.columns]
+        df_bin_psi = df_pct['woe'].unstack().round(4)
+        out = pd.concat([df_bin_psi.sum(axis=1).round(4).rename('PSI'),df_bin_psi,dfout_pct],axis=1)
+        return out
+
+    def variable_psi(self, df, grp, cols, cate_cols, bmk_bin_dict, bmk_pct_dict):
+
+        dfout = []
+        for col in cols:
+            numeric = False if col in cate_cols else True
+            df_tmp = df[[grp,col]].copy()
+            bmk_bin = bmk_bin_dict[col]
+            bmk_pct = bmk_pct_dict[col].rename(columns={'pct':'bmk'})
+            dfout.append(self._psi(df=df_tmp, col=col, bmk_pct=bmk_pct, bmk_bins=bmk_bin, grp = grp, numerical=numeric)['PSI'].rename(col))
+        out = pd.concat(dfout, axis=1).reset_index()
+        return out
+
+    def get_bmk_bins(self, df, cols, nbins):
+        '''
+        function to get the benchmark bins and corresponding percent
+        '''
+        out_bins = {}
+        out_pct = {}
+
+        # for each attribute and score get the bin and pct
+        for col in cols:
+            grp, out_bins[col] = self.pct_rank_qcut(df[col], nbins=nbins)
+            pct = (grp.groupby(grp).size()/len(grp))
+            out_pct[col] = pct
+        
+        return out_bins, out_pct
+
+    def benchmark(self, df, cols, nbins):
+        out_bins = {}
+        out_pct = {}
+        # for each attribute and score get the bin and pct
+        for col in cols:
+            grp, out_bins[col] = self.pct_rank_qcut(df[col], nbins=nbins)
+            pct = (grp.groupby(grp).size()/len(grp))
+            out_pct[col] = pct
+
+        df_out_bins = pd.Series(out_bins).to_frame().reset_index()
+        df_out_bins.columns = ['attribute','bins']
+        df_out_bins['bins'] = df_out_bins['bins'].apply(json.dumps)
+        df_out_pct = pd.concat(out_pct, names=['attribute','bins']).rename('pct').reset_index()
+
+        out_pct = {key: value.drop(columns='attribute') for key, value in df_out_pct.groupby('attribute')}
+        return out_bins, out_pct
+
     def bivar(self, df, segs, nbins=10, bins=None, draw=True):
         '''
         Function to calculate bivar as well as saving the bivar chart
@@ -434,7 +510,7 @@ class model_reporter():
             if bins is None:
                 df_tmp["grp"], bin_dict[col] =  self.pct_rank_qcut(df_tmp[col], nbins=nbins)
             else:
-                df_tmp["grp"] = self.pct_rank_qcut(df_tmp[col], nbins=nbins, bins=bins[col])
+                df_tmp["grp"],_ = self.pct_rank_qcut(df_tmp[col], nbins=nbins, bins=bins[col])
     
             bivar = df_tmp.groupby(segs+["grp"]).agg({col:['size','mean'],self.dep:['mean']})
             bivar.columns = ['n', 'nmean', 'dep_rate']
@@ -524,7 +600,6 @@ class model_reporter():
         worksheet.set_column(0,0,1)
         worksheet.set_column(col,col,max_len + 1)
 
-
     def write_ks(self, df, segs, sheetname, bmk_seg):
         '''
         Function to write KS-table worksheet
@@ -604,6 +679,20 @@ class model_reporter():
         max_row,max_col = self.writedf(res, worksheet, row, col,ratio_col = ['%nmiss'], indexing=False)
         worksheet.autofilter(1, 1, max_row, max_col)
 
+    def write_psi(self, df, seg, bmk_seg, sheetname):
+        benchmark_bin, benchmark_pct = self.benchmark(df[df[seg[0]] == bmk_seg[0]], self.varlist_sort, nbins=10)
+
+        res = self.variable_psi(df=df,
+                                grp=seg[0],
+                                cols=self.varlist_sort,
+                                cate_cols=[],
+                                bmk_bin_dict=benchmark_bin,
+                                bmk_pct_dict=benchmark_pct)
+        row = 1
+        col = 1
+        worksheet = self.workbook.add_worksheet(sheetname)
+        max_row,max_col = self.writedf(res, worksheet, row, col,ratio_col = self.varlist, indexing=False)
+        worksheet.autofilter(1, 1, max_row, max_col)
 
     def run(self):
         '''
@@ -625,6 +714,7 @@ class model_reporter():
         self.write_ks(df,self.segs[0],"KS_by_first_seg",self.bmk_seg[0])
         self.write_bivar(df,[self.segs[0]],"Bivar",self.bmk_seg[0])
         self.write_means(df,self.segs[0],"means_table")
+        self.write_psi(df,self.segs,self.bmk_seg,"PSI")
         
         if len(self.bmk_seg) >1:
             self.write_ks(df,self.segs,"Appdx.All_segs_perf",self.bmk_seg)
