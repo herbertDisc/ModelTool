@@ -521,7 +521,8 @@ class model_reporter():
                 plt.figure(figsize=(8,4))
                 for s in seglist:
                     # plt.plot(bivar.loc[s]['nmean'],bivar.loc[s]['dep_rate'],label=s)
-                    plt.plot(list(range(len(bivar.loc[s]['nmean']))),bivar.loc[s]['dep_rate'],label=s)
+                    # plt.plot(list(range(len(bivar.loc[s]['nmean']))),bivar.loc[s]['dep_rate'],label=s)
+                    plt.plot(bivar.loc[s].index,bivar.loc[s]['dep_rate'],label=s)
                 lgd = plt.legend(loc='center left', bbox_to_anchor=(1, 0.5), ncols = int(np.ceil(len(res)/15)))
                 plt.xlabel(col)
                 plt.ylabel("bad_rate")
