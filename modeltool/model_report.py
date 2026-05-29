@@ -505,7 +505,8 @@ class model_reporter():
         '''
         res = {}
         bin_dict = {}
-        for col in self.num_varlist:
+        plot_varlist = self.num_varlist[:200] if (draw and len(self.num_varlist) > 200) else self.num_varlist
+        for col in plot_varlist:
             df_tmp = df[segs + [self.dep, col]].copy()
             if bins is None:
                 df_tmp["grp"], bin_dict[col] =  self.pct_rank_qcut(df_tmp[col], nbins=nbins)
@@ -689,10 +690,13 @@ class model_reporter():
                                 cate_cols=[],
                                 bmk_bin_dict=benchmark_bin,
                                 bmk_pct_dict=benchmark_pct)
+        res = res.set_index(seg[0]).T.reset_index().rename(columns={'index': 'variable'})
+        res.columns.name = None
+        seg_cols = list(res.columns[1:])
         row = 1
         col = 1
         worksheet = self.workbook.add_worksheet(sheetname)
-        max_row,max_col = self.writedf(res, worksheet, row, col,ratio_col = self.varlist, indexing=False)
+        max_row,max_col = self.writedf(res, worksheet, row, col,ratio_col = seg_cols, indexing=False)
         worksheet.autofilter(1, 1, max_row, max_col)
 
     def run(self):

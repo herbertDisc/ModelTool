@@ -83,6 +83,13 @@ def train_single_model(df_dev,
         early_stop = lgb.early_stopping(early_stopping_rounds, first_metric_only=True)
     callbacks.append(early_stop)
 
+    # XGBoost requires callable objectives to be passed via obj=, not inside params.
+    # Keep 'binary:logistic' in params so eval_metric='auc' and early stopping still work.
+    custom_obj = None
+    if model_type == 'xgb' and callable(param.get('objective')):
+        custom_obj = param.pop('objective')
+        param['objective'] = 'binary:logistic'
+
     n_estimators = param.pop('n_estimators', 100)
     ### train the model
     if model_type == 'xgb':
@@ -93,11 +100,12 @@ def train_single_model(df_dev,
                         (D_valid, 'Valid'),
                         ],
             num_boost_round=n_estimators,
+            obj=custom_obj,
             verbose_eval=False,
             callbacks=callbacks)
-        ### evaluation
-        train_pred = model.predict(D_train)
-        test_pred = model.predict(D_valid)
+        ### evaluation — custom obj outputs raw margin; output_margin keeps consistent scores
+        train_pred = model.predict(D_train, output_margin=custom_obj is not None)
+        test_pred = model.predict(D_valid, output_margin=custom_obj is not None)
     else:
         model = lgb.train(
             params=param,
@@ -119,7 +127,7 @@ def train_single_model(df_dev,
             D_oot = xgb.DMatrix(datain[varlist])
         else:
             D_oot = datain[varlist]
-        datain['pred'] = model.predict(D_oot)
+        datain['pred'] = model.predict(D_oot, output_margin=custom_obj is not None)
 
         perf[key] = eval_func(datain[dep].to_numpy(), datain['pred'].to_numpy())
     perf['dev'] = eval_func(y_train.to_numpy(), train_pred)
@@ -159,7 +167,8 @@ def hyperopt_search(df_dev,
                     varlist=None,
                     test_size= 0.33,
                     seed=123,
-                    eval_func=None):
+                    eval_func=None,
+                    extra_param=None):
 
     def hyperopt_objective(params):
 
@@ -194,6 +203,9 @@ def hyperopt_search(df_dev,
             model_param['min_child_samples'] = int(float(params['min_child_samples']))
 
 
+        if extra_param:
+            model_param.update(extra_param)
+
         model,perf = train_single_model(df_dev=df_dev,
                                     df_oot=df_oot,
                                     dep=dep,
@@ -206,7 +218,7 @@ def hyperopt_search(df_dev,
                                     eval_func=eval_func)
 
         return {
-            'loss': 1 - perf['test'].get('auc', list(perf['test'].values())[0]),
+            'loss': 1 - perf['test'].get('top10lift', list(perf['test'].values())[0]),
             'status': hyperopt.STATUS_OK,
             'model': model,
             'perf': perf,
@@ -250,10 +262,11 @@ def iter_random_search(df_dev,
                        generate_report=False,
                        suffix='',
                        additional_target=['loan_id'],
-                       eval_func=None):
+                       eval_func=None,
+                       extra_param=None):
     """
     run a iterative random search for variable reduction
-    
+
     """
     nowtime = datetime.now().strftime("%y%m%d%H%M%S")
     base_dir = f"iter_randsearch{('_' + suffix) if suffix else ''}"
@@ -275,7 +288,8 @@ def iter_random_search(df_dev,
                                              weight_col=weight_col,
                                              test_size= test_size,
                                              seed=seed,
-                                             eval_func=eval_func)
+                                             eval_func=eval_func,
+                                             extra_param=extra_param)
 
         if model_type == 'xgb':
             imp = model.get_score(importance_type="gain")
@@ -343,7 +357,8 @@ def single_random_search(df_dev,
                          generate_report=False,
                          suffix='',
                          additional_target=['loan_id'],
-                         eval_func=None):
+                         eval_func=None,
+                         extra_param=None):
     """
     run a random search on the hyperparameter space
 
@@ -372,7 +387,8 @@ def single_random_search(df_dev,
                                              varlist=varlist,
                                              test_size= test_size,
                                              seed=all_params['seed'],
-                                             eval_func=eval_func)
+                                             eval_func=eval_func,
+                                             extra_param=extra_param)
 
         perf_flat = {}
         for k, v in perf.items():
