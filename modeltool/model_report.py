@@ -345,20 +345,18 @@ class model_reporter():
         Function for binning the data
         '''
         if bins is None:
-            grp, bins = pd.qcut(series, nbins, labels = False, retbins = True,duplicates='drop')
-            grp = grp.fillna(-1)
+            _, bins = pd.qcut(series, nbins, labels = False, retbins = True,duplicates='drop')
             if len(bins) > 2:
                 bins[0] = -np.inf
                 bins[-1] = np.inf
             else:
                 bins=np.insert(bins,[0,len(bins)],[-np.inf,np.inf])
-            return grp, list(bins)
+            
 
-        else:
-            grp = pd.cut(series, bins=bins, labels = False)
-            grp = grp.fillna(-1)
+        grp = pd.cut(series, bins=bins, labels = False)
+        grp = grp.fillna(-1)
 
-            return grp, list(bins)
+        return grp, list(bins)
 
     def KS(self, df, bins=10, custom_bins = None, sort_in=False):
         """
