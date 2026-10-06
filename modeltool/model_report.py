@@ -105,7 +105,8 @@ class model_reporter():
                  scring=False,
                  probs='probs',
                  scr='scr',
-                 scr_logbase = None) -> None:
+                 scr_logbase = None,
+                 max_report_vars=None) -> None:
         self.csvfile = csvfile
         self.segs = segs
         self.dep = dep
@@ -114,6 +115,7 @@ class model_reporter():
         self.probs = probs
         self.scr = scr
         self.scr_logbase = scr_logbase
+        self.max_report_vars = max_report_vars
 
         self.model_path = model_path
         self.model_type = model_type
@@ -148,6 +150,14 @@ class model_reporter():
                                                     self.model.feature_importance(importance_type='gain')),
                                                 key=lambda x: x[1], reverse=True)]
             self.cat_varlist = []
+
+        # self.varlist (used for scoring via df[self.varlist]) always keeps every feature
+        # the model was trained on. max_report_vars only trims which of those show up in
+        # the bivar/means/PSI sections below, so a report can still be generated for a
+        # model trained on far more features than are worth rendering one-by-one.
+        if self.max_report_vars is not None:
+            self.varlist_sort = self.varlist_sort[:self.max_report_vars]
+            self.cat_varlist = [v for v in self.cat_varlist if v in self.varlist_sort]
         self.num_varlist = [f for f in self.varlist_sort if f not in self.cat_varlist]
 
 
@@ -503,7 +513,7 @@ class model_reporter():
         '''
         res = {}
         bin_dict = {}
-        plot_varlist = self.num_varlist[:200] if (draw and len(self.num_varlist) > 200) else self.num_varlist
+        plot_varlist = self.num_varlist[:100] if (draw and len(self.num_varlist) > 100) else self.num_varlist
         for col in plot_varlist:
             df_tmp = df[segs + [self.dep, col]].copy()
             if bins is None:
@@ -653,7 +663,9 @@ class model_reporter():
         # dup seg columns in order to get the group name within the group by function
         bivar_l= self.bivar(df, segs=segs, bins=bin_dict)[0]
 
-        for var in self.varlist_sort:
+        # bivar() caps at the top 100 attributes by importance (bivar_l.keys()), not the
+        # full varlist_sort - iterating varlist_sort directly would KeyError past that cap
+        for var in bivar_l:
             row += self.write_seg_line(worksheet, row, col, var)
             worksheet.insert_image(row, col+len(bivar_l[var].columns)+5, f"tmp/{var}.png" ,{'x_scale': 0.8, 'y_scale': 0.8})
             row += max(self.writedf(bivar_l[var].fillna('Null'), worksheet, row, col, indexing=True, ratio_col=['Dep_rate'], cdt_fmt=['Dep_rate'])[0],12) + 3

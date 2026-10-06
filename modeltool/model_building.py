@@ -7,8 +7,19 @@ import pandas as pd
 import os, random
 import gc
 from .model_report import model_reporter
+from .model_card_html import render_model_card
 from datetime import datetime
 import numpy as np
+
+def write_html_report(report_path, run):
+    '''
+    render the model_reporter workbook as the HTML model card next to it and drop the workbook
+    '''
+    html_path = render_model_card(report_path,
+                                  project=os.path.basename(os.getcwd()),
+                                  run=run)
+    os.remove(report_path)
+    return html_path
 
 def auc_ks(y_true, y_pred):
     fpr, tpr, _ = roc_curve(y_true, y_pred)
@@ -16,6 +27,24 @@ def auc_ks(y_true, y_pred):
     mdl_ks = max(tpr - fpr)
 
     return {'auc': round(mdl_auc,3), 'ks': round(mdl_ks,3)}
+
+def reg_metrics(y_true, y_pred):
+    '''
+    Default eval_func for model_type='xgb_linear' (continuous dep, e.g. net cash amount).
+    auc_ks assumes a 0/1 target, which doesn't apply here. Spearman is computed via
+    rank + corrcoef (not pandas' method='spearman') to avoid a scipy dependency, matching
+    the approach already used elsewhere in this codebase.
+    '''
+    y_true = pd.Series(np.asarray(y_true, dtype=float))
+    y_pred = pd.Series(np.asarray(y_pred, dtype=float))
+    mask = y_true.notna() & y_pred.notna()
+    y_true, y_pred = y_true[mask], y_pred[mask]
+
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    spearman = float(np.corrcoef(y_true.rank(), y_pred.rank())[0, 1]) if len(y_true) >= 2 else float('nan')
+
+    return {'rmse': round(rmse, 3), 'mae': round(mae, 3), 'spearman': round(spearman, 3)}
 
 def train_single_model(df_dev,
                        df_oot,
@@ -60,15 +89,29 @@ def train_single_model(df_dev,
         random_state=seed
         )
 
+    is_xgb = model_type in ('xgb', 'xgb_linear')
     if model_type == 'xgb':
         default_param = {
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
         }
+    elif model_type == 'xgb_linear':
+        # gblinear: a linear (not tree-based) booster, fit via boosted coordinate descent —
+        # regularized linear/logistic regression trained the xgboost way. Default objective
+        # here is regression (reg:squarederror) since this is meant for continuous targets
+        # like a net cash amount; pass objective='binary:logistic' in param to classify instead.
+        default_param = {
+            'objective': 'reg:squarederror',
+            'booster': 'gblinear',
+            'eval_metric': 'rmse',
+        }
+    else:
+        default_param = {'objective': 'binary', 'metric': 'auc', 'verbosity': -1}
+
+    if is_xgb:
         D_train = xgb.DMatrix(X_train, y_train, weight=w_train)
         D_valid = xgb.DMatrix(X_valid, y_valid)
     else:
-        default_param = {'objective': 'binary', 'metric': 'auc', 'verbosity': -1}
         D_train = lgb.Dataset(X_train, label=y_train, weight=w_train)
         D_valid = lgb.Dataset(X_valid, label=y_valid)
     for key, value in default_param.items():
@@ -77,7 +120,7 @@ def train_single_model(df_dev,
 
     early_stopping_rounds = param.pop('early_stopping_rounds', 8)
     callbacks = []
-    if model_type == 'xgb':
+    if is_xgb:
         early_stop = xgb.callback.EarlyStopping(rounds=early_stopping_rounds)
     else:
         early_stop = lgb.early_stopping(early_stopping_rounds, first_metric_only=True)
@@ -86,13 +129,13 @@ def train_single_model(df_dev,
     # XGBoost requires callable objectives to be passed via obj=, not inside params.
     # Keep 'binary:logistic' in params so eval_metric='auc' and early stopping still work.
     custom_obj = None
-    if model_type == 'xgb' and callable(param.get('objective')):
+    if is_xgb and callable(param.get('objective')):
         custom_obj = param.pop('objective')
         param['objective'] = 'binary:logistic'
 
     n_estimators = param.pop('n_estimators', 100)
     ### train the model
-    if model_type == 'xgb':
+    if is_xgb:
         model = xgb.train(
             params=param,
             dtrain=D_train,
@@ -120,10 +163,11 @@ def train_single_model(df_dev,
 
 
     perf = {}
-    eval_func = auc_ks if eval_func is None else eval_func
+    if eval_func is None:
+        eval_func = reg_metrics if model_type == 'xgb_linear' else auc_ks
     for key,datain in df_oot.items():
         datain = datain.copy()
-        if model_type == 'xgb':
+        if is_xgb:
             D_oot = xgb.DMatrix(datain[varlist])
         else:
             D_oot = datain[varlist]
@@ -133,7 +177,7 @@ def train_single_model(df_dev,
     perf['dev'] = eval_func(y_train.to_numpy(), train_pred)
     perf['test'] = eval_func(y_valid.to_numpy(), test_pred)
 
-    if generate_report and len(varlist)< 200:
+    if generate_report:
         os.makedirs('tmp_single_model', exist_ok=True)
         nowtime = datetime.now().strftime("%y%m%d%H%M%S")
         df_report = df_dev.copy()
@@ -155,6 +199,7 @@ def train_single_model(df_dev,
                              scring=True,
                              scr_logbase=log_score)
         mdlr.run()
+        write_html_report(f'./tmp_single_model/model_{nowtime}.xlsx', 'tmp_single_model')
     return model, perf
 
 def hyperopt_search(df_dev,
@@ -217,8 +262,16 @@ def hyperopt_search(df_dev,
                                     seed=seed,
                                     eval_func=eval_func)
 
+        if 'top10lift' in perf['test']:
+            metric_key, metric_val = 'top10lift', perf['test']['top10lift']
+        else:
+            metric_key, metric_val = next(iter(perf['test'].items()))
+        # rmse/mae (used by reg_metrics, model_type='xgb_linear') are lower-is-better,
+        # unlike auc/ks/top10lift — hyperopt always minimizes 'loss', so don't flip those.
+        loss = metric_val if metric_key in ('rmse', 'mae') else 1 - metric_val
+
         return {
-            'loss': 1 - perf['test'].get('top10lift', list(perf['test'].values())[0]),
+            'loss': loss,
             'status': hyperopt.STATUS_OK,
             'model': model,
             'perf': perf,
@@ -291,8 +344,11 @@ def iter_random_search(df_dev,
                                              eval_func=eval_func,
                                              extra_param=extra_param)
 
-        if model_type == 'xgb':
-            imp = model.get_score(importance_type="gain")
+        if model_type in ('xgb', 'xgb_linear'):
+            # gblinear only supports 'weight' (its coefficients) — 'gain'/'cover' are
+            # tree-specific and raise on a linear booster.
+            importance_type = 'weight' if model_type == 'xgb_linear' else 'gain'
+            imp = model.get_score(importance_type=importance_type)
             imp_df = (
                     pd.DataFrame(list(imp.items()), columns=["col", "imp"])
                     .sort_values("imp", ascending=False)
@@ -310,7 +366,7 @@ def iter_random_search(df_dev,
         print(f'round_{len(imp_df)}:', param)
         var_next = imp_df[(imp_df['cum_imp']<=keep_importance)&(imp_df['imp']>0)]['col'].to_list()
 
-        if model_type == 'xgb':
+        if model_type in ('xgb', 'xgb_linear'):
             model_path = os.path.join(base_dir, 'model', f"model_{nowtime}_{len(imp_df)}.json")
         else:
             model_path = os.path.join(base_dir, 'model', f"model_{nowtime}_{len(imp_df)}.txt")
@@ -339,6 +395,7 @@ def iter_random_search(df_dev,
                                  scring=True,
                                  scr_logbase=log_score)
             mdlr.run()
+            write_html_report(report_path, base_dir)
 
         varlist = var_next
     return
@@ -358,10 +415,15 @@ def single_random_search(df_dev,
                          suffix='',
                          additional_target=['loan_id'],
                          eval_func=None,
-                         extra_param=None):
+                         extra_param=None,
+                         report_max_vars=200):
     """
     run a random search on the hyperparameter space
 
+    report_max_vars caps how many top-importance features the generated report's
+    bivar/means/PSI sections render (model_reporter's max_report_vars) — it does not
+    limit varlist itself, so a report is generated regardless of how large varlist is.
+    Pass None to render every feature in varlist (slow / huge for wide varlists).
     """
     base_dir = f"single_rd_search{('_' + suffix) if suffix else ''}"
     os.makedirs(base_dir, exist_ok=True)
@@ -399,8 +461,9 @@ def single_random_search(df_dev,
         # imp_df = pd.DataFrame({'col':df_dev[varlist].columns,
         #           'imp':model.get_score(importance_type="total_gain")})
         # imp_df_sort = imp_df.sort_values('imp',ascending=False)
-        if model_type == 'xgb':
-            imp = model.get_score(importance_type="gain")
+        if model_type in ('xgb', 'xgb_linear'):
+            importance_type = 'weight' if model_type == 'xgb_linear' else 'gain'
+            imp = model.get_score(importance_type=importance_type)
             imp_df = (
                     pd.DataFrame(list(imp.items()), columns=["col", "imp"])
                     .sort_values("imp", ascending=False)
@@ -419,13 +482,13 @@ def single_random_search(df_dev,
         print(f'round_{i}:', perf)
         print(f'round_{i}:', param)
 
-        if model_type == 'xgb':
+        if model_type in ('xgb', 'xgb_linear'):
             model_path = os.path.join(base_dir, 'model', f"model_{i}.json")
         else:
             model_path = os.path.join(base_dir, 'model', f"model_{i}.txt")
         model.save_model(model_path)
         gc.collect()
-        if generate_report and len(varlist)< 200:
+        if generate_report:
             X_train, X_test, _, _ = train_test_split(df_dev[varlist], df_dev[dep], test_size=test_size, random_state=all_params['seed'])
             df_report = df_dev.copy()
             df_report.loc[X_train.index,'seg'] = 'dev'
@@ -445,8 +508,10 @@ def single_random_search(df_dev,
                                  model_config={},
                                  outputpath=report_path,
                                  scring=True,
-                                 scr_logbase=log_score)
+                                 scr_logbase=log_score,
+                                 max_report_vars=report_max_vars)
             mdlr.run()
+            write_html_report(report_path, base_dir)
         res.append(all_params)
 
     out = pd.DataFrame(res)
